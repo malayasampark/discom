@@ -1,132 +1,305 @@
 const { Router } = require('express');
 const axios = require('axios');
-const pool = require('./db'); // Assumes db.js is in the same directory
+const { query, getClient } = require('./db');
+const {
+    otpRateLimiter,
+    validateRegistration,
+    validateOTP,
+    handleValidationErrors,
+    validateHeaders
+} = require('./middleware');
+const {
+    generateOTP,
+    getOTPExpiryTime,
+    sanitizeInput,
+    generateRequestId
+} = require('./utils');
 
 const router = Router();
 
-// --- Utility Functions ---
+// --- Database Helper Functions ---
 
 /**
- * A simple email format validator.
- * @param {string} email - The email to validate.
- * @returns {boolean} - True if the email format is valid.
+ * Check if consumer exists in CIS
+ * @param {string} identifier - Email or mobile number
+ * @returns {Promise<Object|null>} - Consumer object or null
  */
-const isValidEmail = (email) => {
-    if (!email || typeof email !== 'string') return false;
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const findConsumer = async (identifier) => {
+    const result = await query(
+        'SELECT * FROM cis.consumers WHERE email_address = $1 OR mobile_no = $1',
+        [identifier]
+    );
+    console.log(`findConsumer: Query executed for identifier: ${identifier}`);
+    return result.rows[0] || null;
 };
 
 /**
- * A simple mobile number format validator (10-15 digits).
- * @param {string} mobile - The mobile number to validate.
- * @returns {boolean} - True if the mobile format is valid.
+ * Get complete consumer details including smart meter and accounts
+ * @param {string} identifier - Email address or mobile number
+ * @returns {Promise<Object>} - Complete consumer details
  */
-const isValidMobile = (mobile) => {
-    if (!mobile || typeof mobile !== 'string') return false;
-    return /^\d{10,15}$/.test(mobile);
-};
-
-/**
- * Generates a random 6-digit One-Time Password (OTP).
- * @returns {string} - The generated OTP.
- */
-const generateOTP = () => {
-    return Math.floor(1000 + Math.random() * 9000).toString();
-};
-
-// --- API Endpoint ---
-
-/**
- * POST /api/register
- * Handles user registration by validating input and generating an OTP.
- * Responds with OTP and error details.
- */
-router.post('/register', async (req, res) => {
-    // 1. Header Validation
-    const requiredHeaders = ['authorization', 'content-type', 'accepts', 'user-agent', 'x-timestamp'];
-    const missingHeaders = requiredHeaders.filter(header => !req.headers[header]);
-
-    if (missingHeaders.length > 0) {
-        return res.status(400).json({
-            otp: null,
-            hasError: true,
-            errorCode: 'REGH001',
-            message: `Missing required headers: ${missingHeaders.join(', ')}`
-        });
-    }
-
-    // 2. Body Validation
-    const { emailAddress, mobileNumber } = req.body;
-
-    if ((!emailAddress && !mobileNumber) || (emailAddress && mobileNumber)) {
-        return res.status(400).json({
-            otp: null,
-            hasError: true,
-            errorCode: 'REGB001',
-            message: 'Request body must contain either mobileNumber or emailAddress, but not both.'
-        });
-    }
-
-
-    const userIdentifier = mobileNumber || emailAddress;
-
-    // 3. Format Validation
-    if (mobileNumber && !isValidMobile(mobileNumber)) {
-        return res.status(400).json({
-            otp: null,
-            hasError: true,
-            errorCode: 'REGM001', // Format: XXXX001 for invalid mobile
-            message: 'Invalid mobile number format.'
-        });
-    }
-
-    if (emailAddress && !isValidEmail(emailAddress)) {
-        return res.status(400).json({
-            otp: null,
-            hasError: true,
-            errorCode: 'REME001',
-            message: 'Invalid email address format.'
-        });
-    }
+const getConsumerDetails = async (identifier) => {
+    const client = await getClient();
 
     try {
-        const otp = generateOTP();
+        await client.query('BEGIN');
 
-        // Asynchronously send the OTP to the webhook
-        const webhookUrl = 'https://webhookbot.c-toss.com/api/bot/webhooks/f29494d5-7587-42cc-8255-8f44f25cfe8c';
-        const message = `OTP for ${mobileNumber ? 'mobile number' : 'email address'} ${userIdentifier} is ${otp}.`;
+        // Get consumer information using email or mobile number
+        const consumerResult = await client.query(
+            'SELECT * FROM cis.consumers WHERE email_address = $1 OR mobile_no = $1',
+            [identifier]
+        );
 
-        // Fire-and-forget the webhook call to avoid delaying the API response.
-        // Errors are logged but do not cause the main request to fail.
-        axios.post(webhookUrl, { text: message })
-            .then(response => {
-                console.log(`Successfully sent OTP to webhook for ${userIdentifier}. Status: ${response.status}`);
-            })
-            .catch(webhookError => {
-                // In a production app, you might add this to a retry queue.
-                console.error(
-                    `Failed to send OTP to webhook for ${userIdentifier}:`,
-                    webhookError.response ? webhookError.response.data : webhookError.message
-                );
-            });
+        const consumer = consumerResult.rows[0];
+        if (!consumer) {
+            await client.query('ROLLBACK');
+            return {
+                consumer: null,
+                smartMeter: null,
+                accounts: []
+            };
+        }
 
-        // Send success response immediately
-        return res.status(200).json({
-            otp: otp,
-            hasError: false,
-            errorCode: null,
-            message: `OTP has been generated and sent to ${userIdentifier}.`
-        });
+        // Get consumer accounts using consumer number
+        const accountResult = await client.query(
+            'SELECT * FROM cis.consumer_accounts WHERE consumer_number = $1',
+            [consumer.consumer_number]
+        );
+
+        const accounts = accountResult.rows || [];
+
+        // Get smart meter information using meter number from consumer accounts
+        let smartMeter = null;
+        if (accounts.length > 0 && accounts[0].meter_number) {
+            const meterResult = await client.query(
+                'SELECT * FROM cis.smart_meters WHERE meter_number = $1',
+                [accounts[0].meter_number]
+            );
+            smartMeter = meterResult.rows[0] || null;
+        }
+
+        await client.query('COMMIT');
+
+        return {
+            consumer: consumer,
+            smartMeter: smartMeter,
+            accounts: accounts
+        };
 
     } catch (error) {
-        console.error('Error during registration process:', error);
-        return res.status(500).json({
-            otp: null,
-            hasError: true,
-            errorCode: 'REGS001',
-            message: 'An internal server error occurred. Please try again later.'
-        });
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
     }
-});
+};
+
+/**
+ * Store OTP in the database
+ * @param {string} consumerNumber - Consumer number
+ * @param {string} mobileNumber - Mobile number (mandatory)
+ * @param {string} otp - Generated OTP
+ * @returns {Promise<Object>} - Created OTP record
+ */
+const storeOTP = async (consumerNumber, mobileNumber, otp) => {
+    const expiresAt = getOTPExpiryTime();
+
+    // Invalidate any existing OTPs for this consumer
+    await query(
+        'UPDATE cis.otp_verifications SET is_used = true WHERE consumer_number = $1 AND is_used = false',
+        [consumerNumber]
+    );
+
+    const result = await query(
+        'INSERT INTO cis.otp_verifications (consumer_number, user_identifier, otp_code, expires_at) VALUES ($1, $2, $3, $4) RETURNING *',
+        [consumerNumber, mobileNumber, otp, expiresAt]
+    );
+
+    return result.rows[0];
+};
+
+/**
+ * Verify OTP from the database
+ * @param {string} consumerNumber - Consumer number
+ * @param {string} otp - OTP to verify
+ * @returns {Promise<Object|null>} - OTP record or null
+ */
+const verifyOTP = async (consumerNumber, otp) => {
+    const result = await query(
+        `SELECT * FROM cis.otp_verifications 
+         WHERE consumer_number = $1 AND otp_code = $2 AND expires_at > NOW() AND is_used = false`,
+        [consumerNumber, otp]
+    );
+    return result.rows[0] || null;
+};
+
+/**
+ * Mark OTP as used
+ * @param {number} otpId - OTP record ID
+ * @returns {Promise<void>}
+ */
+const markOTPAsUsed = async (otpId) => {
+    await query(
+        'UPDATE cis.otp_verifications SET is_used = true WHERE id = $1',
+        [otpId]
+    );
+};
+
+/**
+ * Send OTP to webhook
+ * @param {string} userIdentifier - Email or mobile number
+ * @param {string} otp - Generated OTP
+ * @param {string} requestId - Request tracking ID
+ */
+const sendOTPToWebhook = async (userIdentifier, otp, requestId) => {
+    try {
+        const webhookUrl = process.env.WEBHOOK_URL;
+        if (!webhookUrl) {
+            console.error('WEBHOOK_URL not configured');
+            return;
+        }
+
+        const message = `[${requestId}] OTP for ${userIdentifier.includes('@') ? 'email' : 'mobile'} ${userIdentifier} is ${otp}. Valid for ${process.env.OTP_EXPIRY_MINUTES || 5} minutes.`;
+
+        await axios.post(webhookUrl, { text: message }, {
+            timeout: 5000,
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        console.log(`[${requestId}] Successfully sent OTP to webhook for ${userIdentifier}`);
+    } catch (error) {
+        console.error(`[${requestId}] Failed to send OTP to webhook:`, error.message);
+        // Don't throw error - webhook failure shouldn't fail the main request
+    }
+};
+
+// --- API Endpoints ---
+
+/**
+ * POST /api/generateOTP
+ * Generate OTP for consumer after validating against CIS
+ */
+router.post('/generateOTP',
+    validateHeaders,
+    otpRateLimiter,
+    validateRegistration,
+    handleValidationErrors,
+    async (req, res) => {
+        const requestId = generateRequestId();
+        console.log(`[${requestId}] Generate OTP request received`);
+
+        try {
+            const { emailAddress, mobileNumber } = req.body;
+            const userIdentifier = sanitizeInput(emailAddress || mobileNumber);
+
+            // Check if consumer exists in CIS
+            const consumer = await findConsumer(userIdentifier);
+            if (!consumer) {
+                return res.status(404).json({
+                    hasError: true,
+                    errorCode: 'CONSUMER_NOT_FOUND',
+                    message: 'Consumer not found in CIS system'
+                });
+            }
+
+            console.log(`[${requestId}] Consumer found: ${consumer.consumer_number}`);
+
+            // Generate and store OTP (mobile number is mandatory)
+            const otp = generateOTP();
+            await storeOTP(consumer.consumer_number, consumer.mobile_no, otp);
+
+            // Send OTP to webhook
+            await sendOTPToWebhook(userIdentifier, otp, requestId);
+
+            console.log(`[${requestId}] OTP generated and sent for consumer: ${consumer.consumer_number}`);
+
+            // Return success message without consumer details
+            return res.status(200).json({
+                hasError: false,
+                errorCode: null,
+                message: `OTP has been sent to ${userIdentifier}. Please check your ${emailAddress ? 'email' : 'messages'}.`,
+                requestId: requestId
+            });
+
+        } catch (error) {
+            console.error(`[${requestId}] Error during OTP generation:`, error);
+            return res.status(500).json({
+                hasError: true,
+                errorCode: 'OTP_GENERATION_ERROR',
+                message: 'An internal server error occurred. Please try again later.'
+            });
+        }
+    }
+);
+
+/**
+ * POST /api/verifyOTP
+ * Verifies the OTP for a consumer
+ */
+router.post('/verifyOTP',
+    validateHeaders,
+    otpRateLimiter,
+    validateOTP,
+    handleValidationErrors,
+    async (req, res) => {
+        const requestId = generateRequestId();
+        console.log(`[${requestId}] OTP verification request received`);
+
+        try {
+            const { emailAddress, mobileNumber, otp } = req.body;
+            const userIdentifier = sanitizeInput(emailAddress || mobileNumber);
+
+            // Check if consumer exists in CIS
+            const consumer = await findConsumer(userIdentifier);
+            if (!consumer) {
+                return res.status(404).json({
+                    hasError: true,
+                    errorCode: 'CONSUMER_NOT_FOUND',
+                    message: 'Consumer not found in CIS system'
+                });
+            }
+
+            // Verify OTP
+            const otpRecord = await verifyOTP(consumer.consumer_number, otp);
+            if (!otpRecord) {
+                return res.status(400).json({
+                    hasError: true,
+                    errorCode: 'INVALID_OTP',
+                    message: 'Invalid or expired OTP'
+                });
+            }
+
+            // Mark OTP as used
+            await markOTPAsUsed(otpRecord.id);
+
+            // Get complete consumer details using the identifier
+            const consumerDetails = await getConsumerDetails(userIdentifier);
+
+            console.log(`[${requestId}] OTP verified successfully for consumer: ${consumer.consumer_number}`);
+
+            return res.status(200).json({
+                hasError: false,
+                errorCode: null,
+                message: 'OTP verification successful',
+                requestId: requestId,
+                data: {
+                    consumer: consumerDetails.consumer,
+                    smartMeter: consumerDetails.smartMeter,
+                    accounts: consumerDetails.accounts
+                }
+            });
+
+        } catch (error) {
+            console.error(`[${requestId}] Error during OTP verification:`, error);
+            return res.status(500).json({
+                hasError: true,
+                errorCode: 'OTP_VERIFICATION_ERROR',
+                message: 'An internal server error occurred. Please try again later.'
+            });
+        }
+    }
+);
 
 module.exports = router;
