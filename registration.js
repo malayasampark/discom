@@ -9,6 +9,7 @@ const {
     handleValidationErrors,
     validateHeaders
 } = require('./middleware');
+const { body } = require('express-validator');
 const {
     generateOTP,
     getOTPExpiryTime,
@@ -232,6 +233,63 @@ const sendCredentialsToWebhook = async (userId, password, requestId) => {
 };
 
 /**
+ * Validate user credentials
+ * @param {string} consumerNumber - Consumer number (user_id)
+ * @param {string} password - Plain text password
+ * @returns {Promise<Object|null>} - User object if valid, null if invalid
+ */
+const validateUserCredentials = async (consumerNumber, password) => {
+    try {
+        const result = await query(
+            'SELECT * FROM cis.users WHERE user_id = $1 AND status = $2',
+            [consumerNumber, 'ACTIVE']
+        );
+
+        const user = result.rows[0];
+        if (!user) {
+            return null;
+        }
+
+        // Check if account is locked
+        if (user.account_locked_until && new Date(user.account_locked_until) > new Date()) {
+            return { locked: true, user };
+        }
+
+        // Verify password
+        const passwordMatch = await bcrypt.compare(password, user.password_hash);
+
+        if (passwordMatch) {
+            // Reset failed attempts on successful login
+            await query(
+                'UPDATE cis.users SET failed_login_attempts = 0, account_locked_until = NULL, modified_on = CURRENT_TIMESTAMP WHERE user_id = $1',
+                [consumerNumber]
+            );
+            return { success: true, user };
+        } else {
+            // Increment failed attempts
+            const newFailedAttempts = (user.failed_login_attempts || 0) + 1;
+            const lockAccount = newFailedAttempts >= 5;
+            const lockUntil = lockAccount ? new Date(Date.now() + 30 * 60 * 1000) : null; // 30 minutes lock
+
+            await query(
+                'UPDATE cis.users SET failed_login_attempts = $1, account_locked_until = $2, modified_on = CURRENT_TIMESTAMP WHERE user_id = $3',
+                [newFailedAttempts, lockUntil, consumerNumber]
+            );
+
+            return {
+                invalid: true,
+                failedAttempts: newFailedAttempts,
+                locked: lockAccount,
+                lockUntil: lockUntil
+            };
+        }
+    } catch (error) {
+        console.error('Error validating user credentials:', error);
+        throw error;
+    }
+};
+
+/**
  * Send OTP to webhook
  * @param {string} userIdentifier - Email or mobile number
  * @param {string} otp - Generated OTP
@@ -389,6 +447,196 @@ router.post('/verifyOTP',
             return res.status(500).json({
                 hasError: true,
                 errorCode: 'OTP_VERIFICATION_ERROR',
+                message: 'An internal server error occurred. Please try again later.'
+            });
+        }
+    }
+);
+
+/**
+ * POST /api/validateDefaultPassword
+ * Authenticate user with consumer number and password
+ */
+router.post('/validateDefaultPassword',
+    validateHeaders,
+    otpRateLimiter,
+    [
+        body('consumerNumber')
+            .notEmpty()
+            .withMessage('Consumer number is required')
+            .isLength({ min: 1, max: 50 })
+            .withMessage('Consumer number must be between 1 and 50 characters'),
+        body('password')
+            .notEmpty()
+            .withMessage('Password is required')
+            .isLength({ min: 1 })
+            .withMessage('Password cannot be empty')
+    ],
+    handleValidationErrors,
+    async (req, res) => {
+        const requestId = generateRequestId();
+        console.log(`[${requestId}] Validate default password request received`);
+
+        try {
+            const { consumerNumber, password } = req.body;
+            const sanitizedConsumerNumber = sanitizeInput(consumerNumber);
+
+            console.log(`[${requestId}] Attempting default password validation for consumer: ${sanitizedConsumerNumber}`);
+
+            // Validate user credentials
+            const validationResult = await validateUserCredentials(sanitizedConsumerNumber, password);
+
+            if (!validationResult) {
+                console.log(`[${requestId}] User not found or inactive: ${sanitizedConsumerNumber}`);
+                return res.status(401).json({
+                    hasError: true,
+                    errorCode: 'INVALID_CREDENTIALS',
+                    message: 'Invalid consumer number or password'
+                });
+            }
+
+            if (validationResult.locked && !validationResult.success) {
+                console.log(`[${requestId}] Account locked for consumer: ${sanitizedConsumerNumber}`);
+                return res.status(423).json({
+                    hasError: true,
+                    errorCode: 'ACCOUNT_LOCKED',
+                    message: 'Account is locked due to multiple failed login attempts. Please try again later.',
+                    lockUntil: validationResult.lockUntil
+                });
+            }
+
+            if (validationResult.invalid) {
+                console.log(`[${requestId}] Invalid credentials for consumer: ${sanitizedConsumerNumber}, attempts: ${validationResult.failedAttempts}`);
+
+                if (validationResult.locked) {
+                    return res.status(423).json({
+                        hasError: true,
+                        errorCode: 'ACCOUNT_LOCKED',
+                        message: 'Account has been locked due to multiple failed login attempts. Please try again after 30 minutes.',
+                        lockUntil: validationResult.lockUntil
+                    });
+                }
+
+                return res.status(401).json({
+                    hasError: true,
+                    errorCode: 'INVALID_CREDENTIALS',
+                    message: 'Invalid consumer number or password',
+                    failedAttempts: validationResult.failedAttempts,
+                    remainingAttempts: 5 - validationResult.failedAttempts
+                });
+            }
+
+            if (validationResult.success) {
+                console.log(`[${requestId}] Default password validation successful for consumer: ${sanitizedConsumerNumber}`);
+
+                return res.status(200).json({
+                    hasError: false,
+                    errorCode: null,
+                    message: 'Default password validation successful',
+                    requestId: requestId
+                });
+            }
+
+        } catch (error) {
+            console.error(`[${requestId}] Error during default password validation:`, error);
+            return res.status(500).json({
+                hasError: true,
+                errorCode: 'VALIDATION_ERROR',
+                message: 'An internal server error occurred. Please try again later.'
+            });
+        }
+    }
+);
+
+/**
+ * POST /api/storeUserPassword
+ * Store user-entered password for a consumer
+ */
+router.post('/storeUserPassword',
+    validateHeaders,
+    otpRateLimiter,
+    [
+        body('consumerNumber')
+            .notEmpty()
+            .withMessage('Consumer number is required')
+            .isLength({ min: 1, max: 50 })
+            .withMessage('Consumer number must be between 1 and 50 characters'),
+        body('password')
+            .notEmpty()
+            .withMessage('Password is required')
+            .isLength({ min: 8 })
+            .withMessage('Password must be at least 8 characters long')
+            .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/)
+            .withMessage('Password must contain at least one lowercase letter, one uppercase letter, one number, and one special character')
+    ],
+    handleValidationErrors,
+    async (req, res) => {
+        const requestId = generateRequestId();
+        console.log(`[${requestId}] Store user password request received`);
+
+        try {
+            const { consumerNumber, password } = req.body;
+            const sanitizedConsumerNumber = sanitizeInput(consumerNumber);
+
+            console.log(`[${requestId}] Attempting to store password for consumer: ${sanitizedConsumerNumber}`);
+
+            // Check if user exists in cis.users table
+            const userResult = await query(
+                'SELECT * FROM cis.users WHERE user_id = $1',
+                [sanitizedConsumerNumber]
+            );
+
+            if (!userResult.rows[0]) {
+                console.log(`[${requestId}] User not found: ${sanitizedConsumerNumber}`);
+                return res.status(404).json({
+                    hasError: true,
+                    errorCode: 'USER_NOT_FOUND',
+                    message: 'User not found. Please complete OTP verification first.'
+                });
+            }
+
+            // Encrypt the password
+            const saltRounds = 12;
+            const passwordHash = await bcrypt.hash(password, saltRounds);
+
+            // Update the password in cis.users table
+            const updateResult = await query(
+                `UPDATE cis.users 
+                 SET password_hash = $1, modified_by = $2, modified_on = CURRENT_TIMESTAMP 
+                 WHERE user_id = $3 
+                 RETURNING user_id, user_type, status, modified_on`,
+                [passwordHash, 'USER', sanitizedConsumerNumber]
+            );
+
+            if (updateResult.rows.length === 0) {
+                console.log(`[${requestId}] Failed to update password for consumer: ${sanitizedConsumerNumber}`);
+                return res.status(500).json({
+                    hasError: true,
+                    errorCode: 'UPDATE_FAILED',
+                    message: 'Failed to update password. Please try again.'
+                });
+            }
+
+            console.log(`[${requestId}] Password updated successfully for consumer: ${sanitizedConsumerNumber}`);
+
+            return res.status(200).json({
+                hasError: false,
+                errorCode: null,
+                message: 'Password updated successfully',
+                requestId: requestId,
+                data: {
+                    userId: updateResult.rows[0].user_id,
+                    userType: updateResult.rows[0].user_type,
+                    status: updateResult.rows[0].status,
+                    updatedOn: updateResult.rows[0].modified_on
+                }
+            });
+
+        } catch (error) {
+            console.error(`[${requestId}] Error during password storage:`, error);
+            return res.status(500).json({
+                hasError: true,
+                errorCode: 'PASSWORD_STORAGE_ERROR',
                 message: 'An internal server error occurred. Please try again later.'
             });
         }
