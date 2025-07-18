@@ -322,6 +322,64 @@ const sendOTPToWebhook = async (userIdentifier, otp, requestId) => {
 // --- API Endpoints ---
 
 /**
+ * GET /api/health
+ * Health check endpoint to verify service status
+ */
+router.get('/health', async (req, res) => {
+    const requestId = generateRequestId();
+    console.log(`[${requestId}] Health check request received`);
+
+    try {
+        // Test database connectivity
+        const dbResult = await query('SELECT 1 as status');
+        const dbStatus = dbResult.rows[0] ? 'connected' : 'disconnected';
+
+        // Get current timestamp
+        const timestamp = new Date().toISOString();
+
+        console.log(`[${requestId}] Health check completed successfully`);
+
+        return res.status(200).json({
+            hasError: false,
+            errorCode: null,
+            message: 'Service is running',
+            requestId: requestId,
+            data: {
+                status: 'healthy',
+                timestamp: timestamp,
+                service: 'EDF Registration Service',
+                version: '1.0.0',
+                database: {
+                    status: dbStatus,
+                    connected: dbStatus === 'connected'
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error(`[${requestId}] Health check failed:`, error);
+
+        return res.status(503).json({
+            hasError: true,
+            errorCode: 'SERVICE_UNHEALTHY',
+            message: 'Service is not healthy',
+            requestId: requestId,
+            data: {
+                status: 'unhealthy',
+                timestamp: new Date().toISOString(),
+                service: 'EDF Registration Service',
+                version: '1.0.0',
+                database: {
+                    status: 'disconnected',
+                    connected: false
+                },
+                error: error.message
+            }
+        });
+    }
+});
+
+/**
  * POST /api/generateOTP
  * Generate OTP for consumer after validating against CIS
  */
