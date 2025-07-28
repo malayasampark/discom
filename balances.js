@@ -63,18 +63,14 @@ const getConsumerBalance = async (req, res) => {
             data: {
                 consumer_number: consumer_number,
                 account_id: balanceData.account_id,
-                balance_info: {
-                    balance_id: balanceData.balance_id,
-                    current_balance: parseFloat(balanceData.current_balance),
-                    minimum_balance_threshold: parseFloat(balanceData.minimum_balance_threshold),
-                    low_balance_alert_threshold: parseFloat(balanceData.low_balance_alert_threshold),
-                    balance_status: balanceData.balance_status,
-                    tariff_rate: parseFloat(balanceData.tariff_rate),
-                    billing_cycle: balanceData.billing_cycle,
-                    last_balance_updated_on: balanceData.last_balance_updated_on,
-                    created_on: balanceData.created_on,
-                    updated_on: balanceData.updated_on
-                }
+                current_balance: parseFloat(balanceData.current_balance),
+                balance_status: balanceData.balance_status,
+                tariff_rate: parseFloat(balanceData.tariff_rate),
+                billing_cycle: balanceData.billing_cycle,
+                last_balance_updated_on: balanceData.last_balance_updated_on,
+                created_on: balanceData.created_on,
+                updated_on: balanceData.updated_on
+
             }
         });
 
