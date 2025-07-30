@@ -6,6 +6,7 @@ const registrationRouter = require('./registration');
 const { createNewComplaint, upload } = require('./handleComplaints');
 const { createNewRequest, upload: uploadRequest } = require('./handleRequests');
 const { getConsumerBalance } = require('./balances');
+const { getPostpaidBills } = require('./postpaid');
 const log4js = require('log4js');
 const { pool } = require('./db');
 const { apiRateLimiter, errorHandler } = require('./middleware');
@@ -76,6 +77,7 @@ app.use('/api', registrationRouter);
 app.post('/api/newComplaint', upload.single('attachment'), createNewComplaint);
 app.post('/api/newRequest', uploadRequest.single('attachment'), createNewRequest);
 app.get('/api/balance/:consumer_number', getConsumerBalance);
+app.get('/api/getpostpaidbills', getPostpaidBills);
 
 // --- 404 Handler ---
 app.use('*', (req, res) => {
