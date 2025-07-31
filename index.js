@@ -7,6 +7,7 @@ const { createNewComplaint, upload } = require('./handleComplaints');
 const { createNewRequest, upload: uploadRequest } = require('./handleRequests');
 const { getConsumerBalance } = require('./balances');
 const { getPostpaidBills } = require('./postpaid');
+const { startScheduler } = require('./resolutionschedular');
 const log4js = require('log4js');
 const { pool } = require('./db');
 const { apiRateLimiter, errorHandler } = require('./middleware');
@@ -95,6 +96,10 @@ app.use(errorHandler);
 const server = app.listen(PORT, () => {
     logger.info(`Server is running on http://localhost:${PORT}`);
     logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+
+    // Start the complaint resolution scheduler
+    startScheduler();
+    logger.info('Complaint resolution scheduler started');
 });
 
 // --- Graceful Shutdown ---
