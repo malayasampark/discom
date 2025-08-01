@@ -56,8 +56,7 @@ async function generateRequestNumber() {
 }
 
 const createNewRequest = async (req, res) => {
-    const { consumer_number, category, subject, description, priority, status } = req.body;
-    const attachment = req.file;
+    const { consumer_number, category, subject, description, priority, status, attachment_url } = req.body;
 
     if (!consumer_number || !category || !subject || !description || !priority || !status) {
         return res.status(400).json({
@@ -83,7 +82,8 @@ const createNewRequest = async (req, res) => {
         }
 
         const request_number = await generateRequestNumber();
-        const attachment_id = attachment ? attachment.filename : null;
+        // Use attachment_url directly instead of filename
+        const attachment_id = attachment_url || null;
 
         await pool.query(
             `INSERT INTO cis.requests (request_number, consumer_number, category, subject, description, priority, status, attachment_id, created_by)

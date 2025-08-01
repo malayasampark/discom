@@ -56,8 +56,7 @@ async function generateComplaintNumber() {
 }
 
 const createNewComplaint = async (req, res) => {
-    const { consumer_number, subject, description, complaint_type, priority, status } = req.body;
-    const attachment = req.file;
+    const { consumer_number, subject, description, complaint_type, priority, status, attachment_url } = req.body;
 
     if (!consumer_number || !subject || !description) {
         return res.status(400).json({ error: 'consumer_number, subject, and description are required.' });
@@ -79,7 +78,8 @@ const createNewComplaint = async (req, res) => {
         }
 
         const complaint_number = await generateComplaintNumber();
-        const attachment_id = attachment ? attachment.filename : null;
+        // Use attachment_url directly instead of filename
+        const attachment_id = attachment_url || null;
 
         const newComplaint = await pool.query(
             `INSERT INTO cis.complaints (complaint_number, consumer_number, subject, description, complaint_type, priority, status, attachment_id, created_by)

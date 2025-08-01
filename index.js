@@ -75,8 +75,8 @@ app.get('/health', (req, res) => {
 
 // --- Routes ---
 app.use('/api', registrationRouter);
-app.post('/api/newComplaint', upload.single('attachment'), createNewComplaint);
-app.post('/api/newRequest', uploadRequest.single('attachment'), createNewRequest);
+app.post('/api/newComplaint', createNewComplaint);
+app.post('/api/newRequest', createNewRequest);
 app.get('/api/balance/:consumer_number', getConsumerBalance);
 app.get('/api/getpostpaidbills', getPostpaidBills);
 
