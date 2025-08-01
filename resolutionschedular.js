@@ -80,27 +80,22 @@ function generateResolutionContent(complaintDescription, complaintType) {
 
 // Function to post response to dummy API
 async function postResponseToDummyAPI(processedComplaints, totalProcessed) {
+    // If multiple complaints, send each one separately or combine into one response
+    // For now, sending the first complaint data in the required format
+    const firstComplaint = processedComplaints[0];
+
     const responseData = {
-        title: 'Complaint Resolution Scheduler Report',
-        body: {
-            timestamp: new Date().toISOString(),
-            total_complaints_processed: totalProcessed,
-            status: 'completed',
-            processed_complaints: processedComplaints.map(complaint => ({
-                complaint_number: complaint.complaint_number,
-                consumer_number: complaint.consumer_number,
-                complaint_type: complaint.complaint_type,
-                resolution_id: complaint.resolution_id,
-                status: 'resolved',
-                resolution_category: complaint.resolution_details.resolution_category,
-                resolution_summary: complaint.resolution_details.resolution_summary,
-                detailed_resolution: complaint.resolution_details.detailed_resolution,
-                action_taken: complaint.resolution_details.action_taken,
-                root_cause: complaint.resolution_details.root_cause,
-                preventive_measures: complaint.resolution_details.preventive_measures
-            }))
-        },
-        userId: 1
+        timestamp: new Date().toISOString(),
+        complaint_number: firstComplaint.complaint_number,
+        consumer_number: firstComplaint.consumer_number,
+        complaint_type: firstComplaint.complaint_type,
+        resolution_id: firstComplaint.resolution_id,
+        resolution_category: firstComplaint.resolution_category,
+        resolution_summary: firstComplaint.resolution_summary,
+        detailed_resolution: firstComplaint.detailed_resolution,
+        action_taken: firstComplaint.action_taken,
+        root_cause: firstComplaint.root_cause,
+        preventive_measures: firstComplaint.preventive_measures
     };
 
     try {

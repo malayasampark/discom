@@ -91,9 +91,7 @@ const createNewComplaint = async (req, res) => {
         res.status(201).json({
             hasError: false,
             message: 'Complaint created successfully',
-            data: {
-                complaint_number: complaint_number
-            }
+            complaint_number: complaint_number
         });
     } catch (error) {
         console.error('Error creating new complaint:', error);

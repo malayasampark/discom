@@ -94,9 +94,7 @@ const createNewRequest = async (req, res) => {
         res.status(201).json({
             hasError: false,
             message: 'Request created successfully',
-            data: {
-                request_number: request_number
-            }
+            request_number: request_number
         });
     } catch (error) {
         console.error('Error creating new request:', error);
